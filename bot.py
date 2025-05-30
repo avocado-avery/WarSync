@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import discord
@@ -25,6 +25,26 @@ HEADERS = {"Authorization": f"Bearer {config['coc_api_key']}"}
 last_state = None
 last_participants = set()
 war_end_time = None
+
+TH_EMOJIS = {
+    1: "<:th1:1377885021095989278>",
+    2: "<:th2:1377885017707118664>",
+    3: "<:th3:1377885014129381477>",
+    4: "<:th4:1377885009230430208>",
+    5: "<:th5:1377885004671221801>",
+    6: "<:th6:1377884999902036008>",
+    7: "<:th7:1377884995888091146>",
+    8: "<:th8:1377884992218206228>",
+    9: "<:th9:1377884987495419924>",
+    10: "<:th10:1377884982739075122>",
+    11: "<:th11:1377884980990054411>",
+    12: "<:th12:1377884975298252851>",
+    13: "<:th13:1377884973494960178>",
+    14: "<:th14:1377884971284434964>",
+    15: "<:th15:1377884968314736701>",
+    16: "<:th16:1377884966180098118>",
+    17: "<:th17:1377884963692744856>",
+}
 
 
 @bot.event
@@ -56,10 +76,7 @@ async def poll_war():
         player_lines = []
         enemy_lines = []
         two_attack_users = []
-        th_tally_clan = {}
-        th_tally_enemy = {}
 
-        # Parse clan side
         for member in data.get("clan", {}).get("members", []):
             tag = member.get("tag")
             th = member.get("townhallLevel", 0)
@@ -69,12 +86,12 @@ async def poll_war():
             attacks_used = len(member.get("attacks", []))
             attacks_left = max(0, 2 - attacks_used)
 
-            th_tally_clan[th] = th_tally_clan.get(th, 0) + 1
             if attacks_left == 2 and discord_id:
                 two_attack_users.append(discord_id)
 
+            emoji = TH_EMOJIS.get(th, "🏰")
             player_lines.append(
-                (th, f"🏰 {name} (TH{th}) — {attacks_left} attack(s) left")
+                (th, f"{emoji} {name} (TH{th}) — {attacks_left} attack(s) left")
             )
 
             if discord_id and state == "inWar":
@@ -82,48 +99,79 @@ async def poll_war():
                 if member_obj and role:
                     await member_obj.add_roles(role)
 
-        # Parse enemy side
         for enemy in data.get("opponent", {}).get("members", []):
             th = enemy.get("townhallLevel", 0)
             name = enemy.get("name")
-            th_tally_enemy[th] = th_tally_enemy.get(th, 0) + 1
-            enemy_lines.append((th, f"🏰 {name} (TH{th})"))
+            attacks_used = len(enemy.get("attacks", []))
+            attacks_left = max(0, 2 - attacks_used)
+            emoji = TH_EMOJIS.get(th, "🏰")
+            enemy_lines.append(
+                (th, f"{emoji} {name} (TH{th}) — {attacks_left} attack(s) left")
+            )
 
         player_lines.sort(reverse=True)
         enemy_lines.sort(reverse=True)
         sorted_player_lines = [line for _, line in player_lines]
         sorted_enemy_lines = [line for _, line in enemy_lines]
 
-        # On war start
         if state == "inWar" and participants != last_participants:
-            header = "📣 **New war started!**"
+            header = f"📣 **New war started! {len(sorted_player_lines)}v{len(sorted_enemy_lines)} war!**"
             our_clan = data.get("clan", {}).get("name", "Our Clan")
             enemy_clan = data.get("opponent", {}).get("name", "Enemy Clan")
             vs_line = f"**{our_clan} vs {enemy_clan}**"
-            clan_ths = ", ".join(
-                [f"{v} TH{k}" for k, v in sorted(th_tally_clan.items(), reverse=True)]
-            )
-            enemy_ths = ", ".join(
-                [f"{v} TH{k}" for k, v in sorted(th_tally_enemy.items(), reverse=True)]
-            )
-            war_end_time = datetime.utcnow() + timedelta(hours=24)
+            war_end_time = datetime.now(timezone.utc) + timedelta(hours=24)
 
-            await channel.send(
-                f"{role.mention}\n{header}\n{vs_line}\n\n**Our THs:** {clan_ths}\n**Enemy THs:** {enemy_ths}\n\n"
-                + "\n".join(sorted_player_lines)
-                + "\n\n**Enemy Roster:**\n"
-                + "\n".join(sorted_enemy_lines)
-            )
+            messages = []
+            current_message = f"{role.mention}\n{header}\n{vs_line}\n\n"
+            for line in sorted_player_lines:
+                if len(current_message) + len(line) + 1 > 2000:
+                    messages.append(current_message)
+                    current_message = ""
+                current_message += line + "\n"
+            if current_message:
+                messages.append(current_message)
+
+            enemy_header = f"**Enemy Roster ({enemy_clan}):**\n\n"
+            current_enemy = enemy_header
+            for line in sorted_enemy_lines:
+                if len(current_enemy) + len(line) + 1 > 2000:
+                    messages.append(current_enemy)
+                    current_enemy = ""
+                current_enemy += line + "\n"
+            if current_enemy:
+                messages.append(current_enemy)
+
+            for msg in messages:
+                await channel.send(msg.strip())
+
             last_participants = participants
 
-        # On war halfway
         if state == "inWar" and war_end_time:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             remaining = war_end_time - now
             if abs(remaining.total_seconds() - 43200) < 300:
-                await channel.send(
-                    "⏳ **Halfway through the war!**\n" + "\n".join(sorted_player_lines)
+                our_stars = data.get("clan", {}).get("stars", 0)
+                enemy_stars = data.get("opponent", {}).get("stars", 0)
+                our_destruction = data.get("clan", {}).get("destructionPercentage", 0)
+                enemy_destruction = data.get("opponent", {}).get(
+                    "destructionPercentage", 0
                 )
+
+                halfway_msg = (
+                    f"⏳ **Halfway through the war!**\n"
+                    f"**Score:** {our_stars} - {enemy_stars}\n"
+                    f"**Destruction:** {our_destruction:.1f}% - {enemy_destruction:.1f}%\n\n"
+                    + "\n".join(sorted_player_lines)
+                    + "\n\n**Enemy Attacks Left:**\n"
+                    + "\n".join(
+                        [
+                            line
+                            for line in sorted_enemy_lines
+                            if "2 attack(s) left" in line or "1 attack(s) left" in line
+                        ]
+                    )
+                )
+                await channel.send(halfway_msg)
 
             if abs(remaining.total_seconds() - 7200) < 300:
                 mentions = [f"<@{uid}>" for uid in two_attack_users]
@@ -138,7 +186,21 @@ async def poll_war():
                 member_obj = guild.get_member(int(discord_id))
                 if member_obj and role:
                     await member_obj.remove_roles(role)
-            await channel.send("⚔️ **War has ended! Roles have been cleared.**")
+
+            our_clan = data.get("clan", {}).get("name", "Our Clan")
+            enemy_clan = data.get("opponent", {}).get("name", "Enemy Clan")
+            our_stars = data.get("clan", {}).get("stars", 0)
+            enemy_stars = data.get("opponent", {}).get("stars", 0)
+            our_destruction = data.get("clan", {}).get("destructionPercentage", 0)
+            enemy_destruction = data.get("opponent", {}).get("destructionPercentage", 0)
+
+            result_message = (
+                f"⚔️ **War has ended! Roles have been cleared.**\n"
+                f"**{our_clan}**: ⭐ {our_stars} — 🏚 {our_destruction:.1f}%\n"
+                f"**{enemy_clan}**: ⭐ {enemy_stars} — 🏚 {enemy_destruction:.1f}%"
+            )
+
+            await channel.send(result_message)
             last_participants = set()
             war_end_time = None
 
