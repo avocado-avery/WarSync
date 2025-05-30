@@ -114,73 +114,6 @@ async def poll_war():
         sorted_player_lines = [line for _, line in player_lines]
         sorted_enemy_lines = [line for _, line in enemy_lines]
 
-        if state == "inWar" and participants != last_participants:
-            header = f"📣 **New war started! {len(sorted_player_lines)}v{len(sorted_enemy_lines)} war!**"
-            our_clan = data.get("clan", {}).get("name", "Our Clan")
-            enemy_clan = data.get("opponent", {}).get("name", "Enemy Clan")
-            vs_line = f"**{our_clan} vs {enemy_clan}**"
-            war_end_time = datetime.now(timezone.utc) + timedelta(hours=24)
-
-            messages = []
-            current_message = f"{role.mention}\n{header}\n{vs_line}\n\n"
-            for line in sorted_player_lines:
-                if len(current_message) + len(line) + 1 > 2000:
-                    messages.append(current_message)
-                    current_message = ""
-                current_message += line + "\n"
-            if current_message:
-                messages.append(current_message)
-
-            enemy_header = f"**Enemy Roster ({enemy_clan}):**\n\n"
-            current_enemy = enemy_header
-            for line in sorted_enemy_lines:
-                if len(current_enemy) + len(line) + 1 > 2000:
-                    messages.append(current_enemy)
-                    current_enemy = ""
-                current_enemy += line + "\n"
-            if current_enemy:
-                messages.append(current_enemy)
-
-            for msg in messages:
-                await channel.send(msg.strip())
-
-            last_participants = participants
-
-        if state == "inWar" and war_end_time:
-            now = datetime.now(timezone.utc)
-            remaining = war_end_time - now
-            if abs(remaining.total_seconds() - 43200) < 300:
-                our_stars = data.get("clan", {}).get("stars", 0)
-                enemy_stars = data.get("opponent", {}).get("stars", 0)
-                our_destruction = data.get("clan", {}).get("destructionPercentage", 0)
-                enemy_destruction = data.get("opponent", {}).get(
-                    "destructionPercentage", 0
-                )
-
-                halfway_msg = (
-                    f"⏳ **Halfway through the war!**\n"
-                    f"**Score:** {our_stars} - {enemy_stars}\n"
-                    f"**Destruction:** {our_destruction:.1f}% - {enemy_destruction:.1f}%\n\n"
-                    + "\n".join(sorted_player_lines)
-                    + "\n\n**Enemy Attacks Left:**\n"
-                    + "\n".join(
-                        [
-                            line
-                            for line in sorted_enemy_lines
-                            if "2 attack(s) left" in line or "1 attack(s) left" in line
-                        ]
-                    )
-                )
-                await channel.send(halfway_msg)
-
-            if abs(remaining.total_seconds() - 7200) < 300:
-                mentions = [f"<@{uid}>" for uid in two_attack_users]
-                if mentions:
-                    await channel.send(
-                        "⚠️ **2 hours left! The following still have 2 attacks:**\n"
-                        + "\n".join(mentions)
-                    )
-
         if state == "warEnded" and war_end_time is not None:
             for tag, discord_id in user_map.items():
                 member_obj = guild.get_member(int(discord_id))
@@ -194,10 +127,21 @@ async def poll_war():
             our_destruction = data.get("clan", {}).get("destructionPercentage", 0)
             enemy_destruction = data.get("opponent", {}).get("destructionPercentage", 0)
 
+            if our_stars > enemy_stars or (
+                our_stars == enemy_stars and our_destruction > enemy_destruction
+            ):
+                result_title = "🏆 **Victory!**"
+            elif our_stars < enemy_stars or (
+                our_stars == enemy_stars and our_destruction < enemy_destruction
+            ):
+                result_title = "💀 **Defeat!**"
+            else:
+                result_title = "⚖️ **Tie!**"
+
             result_message = (
-                f"⚔️ **War has ended! Roles have been cleared.**\n"
-                f"**{our_clan}**: ⭐ {our_stars} — 🏚 {our_destruction:.1f}%\n"
-                f"**{enemy_clan}**: ⭐ {enemy_stars} — 🏚 {enemy_destruction:.1f}%"
+                f"{result_title}\n\n"
+                f"**{our_clan}**\n⭐ {our_stars}  —  🏚 {our_destruction:.1f}%\n"
+                f"**{enemy_clan}**\n⭐ {enemy_stars}  —  🏚 {enemy_destruction:.1f}%"
             )
 
             await channel.send(result_message)
