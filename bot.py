@@ -181,7 +181,7 @@ async def poll_war():
                         + "\n".join(mentions)
                     )
 
-        if state == "warEnded" and last_state != "warEnded":
+        if state == "warEnded" and war_end_time is not None:
             for tag, discord_id in user_map.items():
                 member_obj = guild.get_member(int(discord_id))
                 if member_obj and role:
