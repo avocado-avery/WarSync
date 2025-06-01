@@ -44,6 +44,7 @@ TH_EMOJIS = {
 }
 
 last_messages = {}
+war_end_times = {}
 
 
 @bot.event
@@ -74,6 +75,9 @@ async def poll_cwl_wars():
 
             guild = bot.get_guild(int(config["guild_id"]))
             channel = guild.get_channel(int(config["announcement_channel_id"]))
+            role = discord.utils.get(
+                guild.roles, name=config.get("war_role", "active-war")
+            )
 
             for war_tag in war_tags:
                 war_url = f"https://api.clashofclans.com/v1/clanwarleagues/wars/{war_tag.replace('#', '%23')}"
@@ -86,18 +90,22 @@ async def poll_cwl_wars():
                     war_data = await war_resp.json()
 
                 state = war_data.get("state")
-                if state not in ["preparation", "inWar"]:
+                if state not in ["preparation", "inWar", "warEnded"]:
                     continue
 
                 try:
                     end_time_raw = war_data.get("endTime") or war_data.get("startTime")
-                    prep_end_time = datetime.fromisoformat(
+                    war_end = datetime.fromisoformat(
                         end_time_raw.replace("UTC", "+00:00")
                     )
                 except Exception:
-                    prep_end_time = datetime.now(timezone.utc) + timedelta(hours=23)
+                    war_end = datetime.now(timezone.utc) + timedelta(hours=23)
 
-                time_left = prep_end_time - datetime.now(timezone.utc)
+                now = datetime.now(timezone.utc)
+                time_left = war_end - now
+                halfway = abs((time_left.total_seconds() - 43200)) < 300
+                final_2hr = abs((time_left.total_seconds() - 7200)) < 300
+                has_ended = state == "warEnded"
 
                 our_clan = war_data.get("clan", {}).get("name", "Our Clan")
                 enemy_clan = war_data.get("opponent", {}).get("name", "Enemy Clan")
@@ -121,6 +129,14 @@ async def poll_cwl_wars():
                     f"{our_clan}: {our_th_summary}\n{enemy_clan}: {enemy_th_summary}"
                 )
 
+                for member in our_members:
+                    tag = member.get("tag")
+                    discord_id = user_map.get(tag)
+                    if discord_id:
+                        member_obj = guild.get_member(int(discord_id))
+                        if member_obj and role:
+                            await member_obj.add_roles(role)
+
                 if last_messages.get(war_tag) != msg_key:
                     msg = (
                         f"📣 **CWL War Status** ({state})\n"
@@ -132,6 +148,70 @@ async def poll_cwl_wars():
                     )
                     await channel.send(msg)
                     last_messages[war_tag] = msg_key
+                    war_end_times[war_tag] = war_end
+
+                # Halfway ping
+                if state == "inWar" and halfway:
+                    stars_us = war_data.get("clan", {}).get("stars", 0)
+                    stars_them = war_data.get("opponent", {}).get("stars", 0)
+                    destruction_us = war_data.get("clan", {}).get(
+                        "destructionPercentage", 0
+                    )
+                    destruction_them = war_data.get("opponent", {}).get(
+                        "destructionPercentage", 0
+                    )
+                    await channel.send(
+                        f"⏳ **Halfway through the CWL war!**\n"
+                        f"**{our_clan}**: ⭐ {stars_us} — 🏚 {destruction_us:.1f}%\n"
+                        f"**{enemy_clan}**: ⭐ {stars_them} — 🏚 {destruction_them:.1f}%"
+                    )
+
+                # Final 2 hour ping
+                if state == "inWar" and final_2hr:
+                    two_attack_users = []
+                    for member in our_members:
+                        tag = member.get("tag")
+                        discord_id = user_map.get(tag)
+                        if discord_id and len(member.get("attacks", [])) == 0:
+                            two_attack_users.append(f"<@{discord_id}>")
+                    if two_attack_users:
+                        await channel.send(
+                            "⚠️ **2 hours left! The following still have 2 attacks:**\n"
+                            + "\n".join(two_attack_users)
+                        )
+
+                # War ended cleanup
+                if has_ended:
+                    for tag, discord_id in user_map.items():
+                        member_obj = guild.get_member(int(discord_id))
+                        if member_obj and role:
+                            await member_obj.remove_roles(role)
+                    stars_us = war_data.get("clan", {}).get("stars", 0)
+                    stars_them = war_data.get("opponent", {}).get("stars", 0)
+                    destruction_us = war_data.get("clan", {}).get(
+                        "destructionPercentage", 0
+                    )
+                    destruction_them = war_data.get("opponent", {}).get(
+                        "destructionPercentage", 0
+                    )
+
+                    if stars_us > stars_them or (
+                        stars_us == stars_them and destruction_us > destruction_them
+                    ):
+                        result_title = "🏆 **Victory!**"
+                    elif stars_us < stars_them or (
+                        stars_us == stars_them and destruction_us < destruction_them
+                    ):
+                        result_title = "💀 **Defeat!**"
+                    else:
+                        result_title = "⚖️ **Tie!**"
+
+                    await channel.send(
+                        f"⚔️ **CWL War has ended! Roles cleared.**\n"
+                        f"**{our_clan}**: ⭐ {stars_us} — 🏚 {destruction_us:.1f}%\n"
+                        f"**{enemy_clan}**: ⭐ {stars_them} — 🏚 {destruction_them:.1f}%\n"
+                        f"{result_title}"
+                    )
 
     except Exception as e:
         print(f"[ERROR] {e}")
