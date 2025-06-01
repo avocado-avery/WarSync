@@ -23,10 +23,6 @@ API_CURRENT_WAR = f"https://api.clashofclans.com/v1/clans/{config['clan_tag'].re
 CWL_GROUP_URL = f"https://api.clashofclans.com/v1/clans/{config['clan_tag'].replace('#', '%23')}/currentwar/leaguegroup"
 HEADERS = {"Authorization": f"Bearer {config['coc_api_key']}"}
 
-last_state = None
-last_participants = set()
-war_end_time = None
-
 TH_EMOJIS = {
     1: "<:th1:1377885021095989278>",
     2: "<:th2:1377885017707118664>",
@@ -47,124 +43,95 @@ TH_EMOJIS = {
     17: "<:th17:1377884963692744856>",
 }
 
+last_messages = {}
+
 
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-    poll_war.start()
+    poll_cwl_wars.start()
 
 
 @tasks.loop(seconds=300)
-async def poll_war():
-    global last_state, last_participants, war_end_time
+async def poll_cwl_wars():
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(API_CURRENT_WAR, headers=HEADERS) as resp:
-                if resp.status != 200:
-                    print("[INFO] Trying CWL war endpoint instead...")
-                    async with session.get(CWL_GROUP_URL, headers=HEADERS) as cwl_resp:
-                        if cwl_resp.status != 200:
-                            print(
-                                f"[ERROR] Failed to fetch CWL group info: {cwl_resp.status}"
-                            )
-                            return
-                        league_data = await cwl_resp.json()
+            async with session.get(CWL_GROUP_URL, headers=HEADERS) as cwl_resp:
+                if cwl_resp.status != 200:
+                    print(f"[ERROR] Failed to fetch CWL group info: {cwl_resp.status}")
+                    return
+                league_data = await cwl_resp.json()
 
-                    war_tags = [
-                        tag
-                        for round in league_data.get("rounds", [])
-                        for tag in round.get("warTags", [])
-                        if tag != "#0"
-                    ]
-                    current_war_data = None
-                    for war_tag in war_tags:
-                        war_url = f"https://api.clashofclans.com/v1/clanwarleagues/wars/{war_tag.replace('#', '%23')}"
-                        async with session.get(war_url, headers=HEADERS) as war_resp:
-                            if war_resp.status == 200:
-                                potential_data = await war_resp.json()
-                                if (
-                                    potential_data.get("state")
-                                    in ["preparation", "inWar"]
-                                    and potential_data.get("clan", {}).get("tag")
-                                    == config["clan_tag"]
-                                ):
-                                    current_war_data = potential_data
-                                    break
+            war_tags = [
+                tag
+                for round in league_data.get("rounds", [])
+                for tag in round.get("warTags", [])
+                if tag != "#0"
+            ]
+            if not war_tags:
+                print("[INFO] No active war tags found.")
+                return
 
-                    if not current_war_data:
-                        print("[ERROR] No active CWL war found.")
-                        return
+            guild = bot.get_guild(int(config["guild_id"]))
+            channel = guild.get_channel(int(config["announcement_channel_id"]))
 
-                    data = current_war_data
-                else:
-                    data = await resp.json()
+            for war_tag in war_tags:
+                war_url = f"https://api.clashofclans.com/v1/clanwarleagues/wars/{war_tag.replace('#', '%23')}"
+                async with session.get(war_url, headers=HEADERS) as war_resp:
+                    if war_resp.status != 200:
+                        print(
+                            f"[WARN] Failed to fetch war {war_tag}: {war_resp.status}"
+                        )
+                        continue
+                    war_data = await war_resp.json()
 
-        state = data.get("state")
-        if state not in ["preparation", "inWar", "warEnded"]:
-            return
+                state = war_data.get("state")
+                if state not in ["preparation", "inWar"]:
+                    continue
 
-        guild = bot.get_guild(int(config["guild_id"]))
-        channel = guild.get_channel(int(config["announcement_channel_id"]))
-        role = discord.utils.get(guild.roles, name=config.get("war_role", "active-war"))
+                try:
+                    end_time_raw = war_data.get("endTime") or war_data.get("startTime")
+                    prep_end_time = datetime.fromisoformat(
+                        end_time_raw.replace("UTC", "+00:00")
+                    )
+                except Exception:
+                    prep_end_time = datetime.now(timezone.utc) + timedelta(hours=23)
 
-        # PREP STAGE NOTICE
-        if state == "preparation" and last_state != "preparation":
-            prep_end_time = datetime.fromisoformat(
-                data["endTime"].replace("UTC", "+00:00")
-            )
-            time_left = prep_end_time - datetime.now(timezone.utc)
+                time_left = prep_end_time - datetime.now(timezone.utc)
 
-            war_type = "CWL" if data.get("warType", "") == "cwl" else "regular war"
-            our_clan = data.get("clan", {}).get("name", "Our Clan")
-            enemy_clan = data.get("opponent", {}).get("name", "Enemy Clan")
+                our_clan = war_data.get("clan", {}).get("name", "Our Clan")
+                enemy_clan = war_data.get("opponent", {}).get("name", "Enemy Clan")
+                our_members = war_data.get("clan", {}).get("members", [])
+                enemy_members = war_data.get("opponent", {}).get("members", [])
 
-            clan_size = len(data.get("clan", {}).get("members", []))
-            enemy_size = len(data.get("opponent", {}).get("members", []))
+                def summarize_ths(members):
+                    th_counts = {}
+                    for m in members:
+                        th = m.get("townhallLevel")
+                        th_counts[th] = th_counts.get(th, 0) + 1
+                    return " ".join(
+                        f"{TH_EMOJIS.get(th, str(th))}x{count}"
+                        for th, count in sorted(th_counts.items(), reverse=True)
+                    )
 
-            prep_message = (
-                f"🛡️ **{war_type.title()} prep has begun!**\n"
-                f"**{our_clan} vs {enemy_clan}** — {clan_size}v{enemy_size}\n"
-                f"⏳ War starts in **{int(time_left.total_seconds() // 3600)} hours and {(time_left.total_seconds() % 3600) // 60:.0f} minutes**."
-            )
+                our_th_summary = summarize_ths(our_members)
+                enemy_th_summary = summarize_ths(enemy_members)
 
-            await channel.send(prep_message)
+                msg_key = (
+                    f"{our_clan}: {our_th_summary}\n{enemy_clan}: {enemy_th_summary}"
+                )
 
-        # CLEANUP + TRACK CURRENT STATE
-        if state == "warEnded" and war_end_time is not None:
-            for tag, discord_id in user_map.items():
-                member_obj = guild.get_member(int(discord_id))
-                if member_obj and role:
-                    await member_obj.remove_roles(role)
-
-            our_clan = data.get("clan", {}).get("name", "Our Clan")
-            enemy_clan = data.get("opponent", {}).get("name", "Enemy Clan")
-            our_stars = data.get("clan", {}).get("stars", 0)
-            enemy_stars = data.get("opponent", {}).get("stars", 0)
-            our_destruction = data.get("clan", {}).get("destructionPercentage", 0)
-            enemy_destruction = data.get("opponent", {}).get("destructionPercentage", 0)
-
-            if our_stars > enemy_stars or (
-                our_stars == enemy_stars and our_destruction > enemy_destruction
-            ):
-                result_title = "🏆 **Victory!**"
-            elif our_stars < enemy_stars or (
-                our_stars == enemy_stars and our_destruction < enemy_destruction
-            ):
-                result_title = "💀 **Defeat!**"
-            else:
-                result_title = "⚖️ **Tie!**"
-
-            result_message = (
-                f"{result_title}\n\n"
-                f"**{our_clan}**\n⭐ {our_stars}  —  🏚 {our_destruction:.1f}%\n"
-                f"**{enemy_clan}**\n⭐ {enemy_stars}  —  🏚 {enemy_destruction:.1f}%"
-            )
-
-            await channel.send(result_message)
-            last_participants = set()
-            war_end_time = None
-
-        last_state = state
+                if last_messages.get(war_tag) != msg_key:
+                    msg = (
+                        f"📣 **CWL War Status** ({state})\n"
+                        f"**{our_clan} vs {enemy_clan}** — {len(our_members)}v{len(enemy_members)}\n"
+                        f"⏳ Starts or ends in: **{int(time_left.total_seconds() // 3600)}h {(time_left.total_seconds() % 3600) // 60:.0f}m**\n"
+                        f"🔗 Tag: `{war_tag}`\n"
+                        f"**{our_clan}**: {our_th_summary}\n"
+                        f"**{enemy_clan}**: {enemy_th_summary}"
+                    )
+                    await channel.send(msg)
+                    last_messages[war_tag] = msg_key
 
     except Exception as e:
         print(f"[ERROR] {e}")
