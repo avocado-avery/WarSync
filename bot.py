@@ -19,8 +19,8 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-API_URL = f"https://api.clashofclans.com/v1/clans/{config['clan_tag'].replace('#', '%23')}/currentwar"
-CWL_GROUP_URL = f"https://api.clashofclans.com/v1/clans/{config['clan_tag'].replace('#', '%23')}/currentwarleaguegroup"
+API_CURRENT_WAR = f"https://api.clashofclans.com/v1/clans/{config['clan_tag'].replace('#', '%23')}/currentwar"
+CWL_GROUP_URL = f"https://api.clashofclans.com/v1/clans/{config['clan_tag'].replace('#', '%23')}/currentwar/leaguegroup"
 HEADERS = {"Authorization": f"Bearer {config['coc_api_key']}"}
 
 last_state = None
@@ -54,16 +54,50 @@ async def on_ready():
     poll_war.start()
 
 
-@tasks.loop(seconds=60)
+@tasks.loop(seconds=300)
 async def poll_war():
     global last_state, last_participants, war_end_time
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(API_URL, headers=HEADERS) as resp:
+            async with session.get(API_CURRENT_WAR, headers=HEADERS) as resp:
                 if resp.status != 200:
-                    print(f"[ERROR] Failed to fetch war info: {resp.status}")
-                    return
-                data = await resp.json()
+                    print("[INFO] Trying CWL war endpoint instead...")
+                    async with session.get(CWL_GROUP_URL, headers=HEADERS) as cwl_resp:
+                        if cwl_resp.status != 200:
+                            print(
+                                f"[ERROR] Failed to fetch CWL group info: {cwl_resp.status}"
+                            )
+                            return
+                        league_data = await cwl_resp.json()
+
+                    war_tags = [
+                        tag
+                        for round in league_data.get("rounds", [])
+                        for tag in round.get("warTags", [])
+                        if tag != "#0"
+                    ]
+                    current_war_data = None
+                    for war_tag in war_tags:
+                        war_url = f"https://api.clashofclans.com/v1/clanwarleagues/wars/{war_tag.replace('#', '%23')}"
+                        async with session.get(war_url, headers=HEADERS) as war_resp:
+                            if war_resp.status == 200:
+                                potential_data = await war_resp.json()
+                                if (
+                                    potential_data.get("state")
+                                    in ["preparation", "inWar"]
+                                    and potential_data.get("clan", {}).get("tag")
+                                    == config["clan_tag"]
+                                ):
+                                    current_war_data = potential_data
+                                    break
+
+                    if not current_war_data:
+                        print("[ERROR] No active CWL war found.")
+                        return
+
+                    data = current_war_data
+                else:
+                    data = await resp.json()
 
         state = data.get("state")
         if state not in ["preparation", "inWar", "warEnded"]:
@@ -87,17 +121,8 @@ async def poll_war():
             clan_size = len(data.get("clan", {}).get("members", []))
             enemy_size = len(data.get("opponent", {}).get("members", []))
 
-            round_info = ""
-            if war_type == "CWL":
-                async with session.get(CWL_GROUP_URL, headers=HEADERS) as cwl_resp:
-                    if cwl_resp.status == 200:
-                        cwl_data = await cwl_resp.json()
-                        if "rounds" in cwl_data:
-                            round_number = len(cwl_data["rounds"])
-                            round_info = f" (Round {round_number})"
-
             prep_message = (
-                f"🛡️ **{war_type.title()} prep has begun!{round_info}**\n"
+                f"🛡️ **{war_type.title()} prep has begun!**\n"
                 f"**{our_clan} vs {enemy_clan}** — {clan_size}v{enemy_size}\n"
                 f"⏳ War starts in **{int(time_left.total_seconds() // 3600)} hours and {(time_left.total_seconds() % 3600) // 60:.0f} minutes**."
             )
