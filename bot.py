@@ -20,6 +20,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 API_URL = f"https://api.clashofclans.com/v1/clans/{config['clan_tag'].replace('#', '%23')}/currentwar"
+CWL_GROUP_URL = f"https://api.clashofclans.com/v1/clans/{config['clan_tag'].replace('#', '%23')}/currentwarleaguegroup"
 HEADERS = {"Authorization": f"Bearer {config['coc_api_key']}"}
 
 last_state = None
@@ -53,7 +54,7 @@ async def on_ready():
     poll_war.start()
 
 
-@tasks.loop(seconds=300)
+@tasks.loop(seconds=60)
 async def poll_war():
     global last_state, last_participants, war_end_time
     try:
@@ -86,8 +87,17 @@ async def poll_war():
             clan_size = len(data.get("clan", {}).get("members", []))
             enemy_size = len(data.get("opponent", {}).get("members", []))
 
+            round_info = ""
+            if war_type == "CWL":
+                async with session.get(CWL_GROUP_URL, headers=HEADERS) as cwl_resp:
+                    if cwl_resp.status == 200:
+                        cwl_data = await cwl_resp.json()
+                        if "rounds" in cwl_data:
+                            round_number = len(cwl_data["rounds"])
+                            round_info = f" (Round {round_number})"
+
             prep_message = (
-                f"🛡️ **{war_type.title()} prep has begun!**\n"
+                f"🛡️ **{war_type.title()} prep has begun!{round_info}**\n"
                 f"**{our_clan} vs {enemy_clan}** — {clan_size}v{enemy_size}\n"
                 f"⏳ War starts in **{int(time_left.total_seconds() // 3600)} hours and {(time_left.total_seconds() % 3600) // 60:.0f} minutes**."
             )
